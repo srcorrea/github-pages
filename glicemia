@@ -1,0 +1,185 @@
+import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+import sqlite3
+from fpdf import FPDF
+from datetime import datetime
+import io
+
+st.set_page_config(layout="wide", page_title="Login - Controle Glicemia")
+
+# Estilo personalizado
+theme_css = """
+<style>
+    .stTextInput > div > div > input {
+        font-size: 16px;
+        padding: 10px;
+    }
+    .stButton button {
+        background-color: #008CBA;
+        color: white;
+        padding: 10px 20px;
+        border-radius: 8px;
+        border: none;
+    }
+    .stButton button:hover {
+        background-color: #006f94;
+    }
+    @media only screen and (max-width: 768px) {
+        h1 {
+            font-size: 24px !important;
+        }
+    }
+</style>
+"""
+st.markdown(theme_css, unsafe_allow_html=True)
+
+st.markdown("<h1 style='text-align: center;'>🩸 Login - Controle de Glicemia</h1>", unsafe_allow_html=True)
+st.divider()
+
+# Banco de dados SQLite
+conn = sqlite3.connect("glicemia.db", check_same_thread=False)
+cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS usuarios (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    usuario TEXT UNIQUE,
+    senha TEXT
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS glicemia (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    usuario TEXT,
+    data TEXT,
+    horario TEXT,
+    valor INTEGER,
+    crise TEXT
+)
+""")
+conn.commit()
+
+# Funções de banco
+
+def verificar_login(usuario, senha):
+    cursor.execute("SELECT * FROM usuarios WHERE usuario = ? AND senha = ?", (usuario, senha))
+    return cursor.fetchone()
+
+def registrar_usuario(usuario, senha):
+    try:
+        cursor.execute("INSERT INTO usuarios (usuario, senha) VALUES (?, ?)", (usuario, senha))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+def salvar_dados(usuario, df):
+    data = datetime.now().strftime("%Y-%m-%d")
+    for _, row in df.iterrows():
+        cursor.execute("""
+            INSERT INTO glicemia (usuario, data, horario, valor, crise)
+            VALUES (?, ?, ?, ?, ?)""",
+            (usuario, data, row['Horário'], row['Glicemia'], row['Crise'])
+        )
+    conn.commit()
+
+def gerar_pdf(df, media):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    pdf.cell(0, 10, f"Relatório de Glicemia - {datetime.now().strftime('%d/%m/%Y')}", ln=True)
+    pdf.ln(10)
+    for _, row in df.iterrows():
+        pdf.cell(0, 10, f"{row['Horário']}: {row['Glicemia']} mg/dL ({row['Crise']})", ln=True)
+    pdf.ln(5)
+    pdf.cell(0, 10, f"Média: {media:.2f} mg/dL", ln=True)
+    buf = io.BytesIO()
+    pdf.output(buf)
+    return buf
+
+# Autenticação
+if "usuario" not in st.session_state:
+    st.session_state.usuario = None
+
+if st.session_state.usuario is None:
+    st.title("🔐 Login")
+    menu = st.selectbox("Escolha uma opção:", ["Login", "Registrar"])
+
+    user = st.text_input("Usuário")
+    password = st.text_input("Senha", type="password")
+
+    if menu == "Login":
+        if st.button("Entrar"):
+            if verificar_login(user, password):
+                st.session_state.usuario = user
+                st.rerun()
+            else:
+                st.error("Usuário ou senha inválidos.")
+    else:
+        if st.button("Registrar"):
+            if registrar_usuario(user, password):
+                st.success("Usuário registrado com sucesso! Faça login.")
+            else:
+                st.error("Usuário já existe.")
+else:
+    st.sidebar.write(f"👤 Usuário: {st.session_state.usuario}")
+    if st.sidebar.button("Sair"):
+        st.session_state.usuario = None
+        st.rerun()
+
+    st.title("🩸 Controle Diário de Glicemia")
+    st.subheader("Insira as 8 medições de glicemia (mg/dL) do dia")
+
+    labels = [
+        "Ao acordar", "Antes do café", "Após o café", "Antes do almoço",
+        "Após o almoço", "Antes do jantar", "Após o jantar", "Antes de dormir"
+    ]
+    medicoes = [st.number_input(f"{label}:", min_value=0, max_value=600, step=1, key=f"m{i}") for i, label in enumerate(labels)]
+    df = pd.DataFrame({'Horário': labels, 'Glicemia': medicoes})
+    media = df['Glicemia'].mean()
+    df['Crise'] = df['Glicemia'].apply(lambda x: "Hipo" if x < 70 else "Hiper" if x > 180 else "Normal")
+
+    st.subheader("📊 Resultados")
+    st.write(f"Média diária: **{media:.2f} mg/dL**")
+    if any(df['Crise'] != "Normal"):
+        st.error("⚠️ Crise detectada! Verifique as medidas abaixo.")
+    st.dataframe(df, use_container_width=True)
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(df['Horário'], df['Glicemia'], marker='o', color='blue')
+    ax.axhline(70, color='orange', linestyle='--', label='Limite Hipo')
+    ax.axhline(180, color='red', linestyle='--', label='Limite Hiper')
+    ax.set_title("Gráfico de Glicemia Diária")
+    ax.set_ylabel("Glicemia (mg/dL)")
+    ax.set_xticks(range(8))
+    ax.set_xticklabels(labels, rotation=45, ha='right')
+    ax.legend()
+    st.pyplot(fig)
+
+    if st.button("💾 Salvar dados"):
+        salvar_dados(st.session_state.usuario, df)
+        st.success("Dados salvos com sucesso.")
+
+    pdf_bytes = gerar_pdf(df, media)
+    st.download_button(
+        label="📥 Baixar relatório em PDF",
+        data=pdf_bytes.getvalue(),
+        file_name="relatorio_glicemia.pdf",
+        mime="application/pdf"
+    )
+
+    st.subheader("📈 Histórico Mensal")
+    consulta = """
+    SELECT data, AVG(valor) as media FROM glicemia
+    WHERE usuario = ?
+    GROUP BY data
+    ORDER BY data DESC
+    LIMIT 30
+    """
+    historico = pd.read_sql_query(consulta, conn, params=(st.session_state.usuario,))
+    if not historico.empty:
+        st.line_chart(historico.set_index('data')['media'])
+    else:
+        st.info("Nenhum dado salvo ainda.")
